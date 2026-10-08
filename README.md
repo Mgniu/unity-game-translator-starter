@@ -1,50 +1,23 @@
-# Unity Game Translator Starter
+# Unity Game Translator — Finalized Plugin Version
 
-A lightweight real-time English-to-Chinese translation starter for Unity, powered by a free local LibreTranslate service.
+This repository now contains a near-drop-in Unity plugin that you can import into your projects. New additions:
 
-## Features
+- Assets/Prefabs are created via an Editor menu (Create Prefab Manager)
+- RuntimeBootstrap to auto-instantiate the TranslatorManager prefab from Resources at runtime
+- BuildTranslationExporter that scans enabled scenes and exports translations.json to Assets/Resources for offline builds
 
-- Real-time translation for TextMeshPro text
-- Local LibreTranslate integration (free and self-hosted)
-- Simple in-memory + disk caching
-- Scene scanning to auto-register text objects
-- Editor menu for one-click scene setup
-- Queue-based request handling to reduce overload
+How to use (quick):
 
-## Setup
+1. In Unity Editor, open the project containing this plugin (or copy the Assets folder into your project).
+2. Tools -> Translator -> Create Prefab Manager. This creates TranslatorManager.prefab in Assets/Prefabs and Assets/Resources.
+3. In your startup scene, add RuntimeBootstrap (to any GameObject) or rely on the Resources prefab to be instantiated at runtime.
+4. Tools -> Translator -> Auto Translate Scene to attach TextAutoTranslate to all TextMeshPro texts in the current scene.
+5. To pre-generate offline translations before a build, use Tools -> Translator -> Export Translations For Build. The exporter calls the configured LibreTranslate server (default http://localhost:5000/translate) and writes Assets/Resources/translations.json.
 
-1. Start a local translation server:
+At runtime you can load and use the translations.json from Resources to avoid network calls.
 
-```bash
-docker pull libretranslate/libretranslate
-docker run -d -p 5000:5000 libretranslate/libretranslate
-```
+Notes & Caveats:
+- The build-time exporter sends individual HTTP requests for each unique string. Large projects may take a long time; consider batching or running on a machine with reliable network.
+- The exporter uses synchronous HTTP calls in the Editor for simplicity. If you have special network requirements, adapt the code.
+- For production, consider deploying a dedicated translate server or pre-translating content during localization pipelines.
 
-2. Copy the script files into your Unity project:
-   - `Assets/Plugins/Translator/TranslatorClient.cs`
-   - `Assets/Plugins/Translator/TextAutoTranslate.cs`
-   - `Assets/Plugins/Translator/SceneAutoTranslator.cs`
-   - `Assets/Editor/AutoTranslateSceneMenu.cs`
-
-3. In Unity, open the menu:
-   - `Tools > Translator > Create Manager`
-
-4. Then run:
-   - `Tools > Translator > Auto Translate Scene`
-
-5. Play the scene and verify that TextMeshPro objects are translated from English to Chinese.
-
-## Default configuration
-
-- `serverUrl`: `http://localhost:5000/translate`
-- `sourceLang`: `en`
-- `targetLang`: `zh`
-
-## Notes
-
-- This is a starter framework for rapid prototyping and gameplay localization.
-- For production, add pre-generated localization tables or a dedicated server deployment.
-
-## License
-
-MIT
