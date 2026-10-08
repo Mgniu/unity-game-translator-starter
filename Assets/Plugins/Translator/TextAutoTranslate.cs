@@ -7,18 +7,27 @@ public class TextAutoTranslate : MonoBehaviour {
     public bool translateOnStart = true;
     public bool translateOnTextChanged = true;
     public bool keepOriginalInTooltip = false;
+    public bool skipIfAlreadyChinese = true;
+    public bool autoTranslateRuntimeOnly = true;
 
     private TMP_Text tmp;
     private string originalText;
     private bool hasTranslated = false;
+    private bool isTranslating = false;
 
     void Awake() {
         tmp = GetComponent<TMP_Text>();
+        originalText = tmp.text;
     }
 
     void OnEnable() {
+        if (tmp == null) {
+            tmp = GetComponent<TMP_Text>();
+        }
+
         originalText = tmp.text;
         TMPro_EventManager.TEXT_CHANGED_EVENT.Add(OnTextChangedEvent);
+
         if (translateOnStart) {
             TryTranslateNow();
         }
@@ -29,8 +38,8 @@ public class TextAutoTranslate : MonoBehaviour {
     }
 
     void OnTextChangedEvent(Object obj) {
-        if (obj == tmp && translateOnTextChanged) {
-            if (tmp.text != originalText && !string.IsNullOrEmpty(tmp.text)) {
+        if (obj == tmp && translateOnTextChanged && !isTranslating) {
+            if (!string.IsNullOrEmpty(tmp.text) && tmp.text != originalText) {
                 originalText = tmp.text;
                 TryTranslateNow();
             }
@@ -38,21 +47,38 @@ public class TextAutoTranslate : MonoBehaviour {
     }
 
     public void TryTranslateNow() {
+        if (tmp == null) {
+            tmp = GetComponent<TMP_Text>();
+        }
+
+        if (tmp == null) {
+            return;
+        }
+
         var textToTranslate = tmp.text;
         if (string.IsNullOrEmpty(textToTranslate)) {
             return;
         }
 
-        if (hasTranslated && LooksLikeChinese(textToTranslate)) {
+        if (skipIfAlreadyChinese && LooksLikeChinese(textToTranslate)) {
             return;
         }
 
         if (TranslatorClient.Instance == null) {
-            Debug.LogWarning("[TextAutoTranslate] TranslatorClient.Instance is null. Add TranslatorClient to the scene.");
+            Debug.LogWarning("[TextAutoTranslate] TranslatorClient is missing. Create a TranslatorManager object.");
             return;
         }
 
+        if (isTranslating) {
+            return;
+        }
+
+        isTranslating = true;
+        originalText = textToTranslate;
+
         TranslatorClient.Instance.Translate(textToTranslate, (translated) => {
+            isTranslating = false;
+
             if (string.IsNullOrEmpty(translated) || translated == textToTranslate) {
                 return;
             }
@@ -66,7 +92,16 @@ public class TextAutoTranslate : MonoBehaviour {
         });
     }
 
-    bool LooksLikeChinese(string s) {
+    public void ResetTextToOriginal() {
+        if (tmp == null) {
+            tmp = GetComponent<TMP_Text>();
+        }
+        if (tmp != null) {
+            tmp.text = originalText;
+        }
+    }
+
+    private bool LooksLikeChinese(string s) {
         foreach (char c in s) {
             if (c >= 0x4E00 && c <= 0x9FFF) {
                 return true;
@@ -75,7 +110,7 @@ public class TextAutoTranslate : MonoBehaviour {
         return false;
     }
 
-    string Truncate(string s, int len) {
+    private string Truncate(string s, int len) {
         if (s == null) return "";
         return s.Length <= len ? s : s.Substring(0, len) + "...";
     }

@@ -13,14 +13,24 @@ public class LibreResponse {
 public class TranslatorClient : MonoBehaviour {
     public static TranslatorClient Instance { get; private set; }
 
-    [Header("Translation Server (LibreTranslate)")]
+    [Header("Translation Server")]
     public string serverUrl = "http://localhost:5000/translate";
     public string sourceLang = "en";
     public string targetLang = "zh";
     public int maxRetries = 2;
+    public int maxConcurrentRequests = 2;
 
-    private Dictionary<string, string> cache = new Dictionary<string, string>();
+    private readonly Dictionary<string, string> cache = new Dictionary<string, string>();
+    private readonly Queue<TranslateRequest> queue = new Queue<TranslateRequest>();
+    private int activeRequests = 0;
+    private bool isProcessingQueue = false;
     private string cachePath => System.IO.Path.Combine(Application.persistentDataPath, "translation_cache.json");
+
+    private class TranslateRequest {
+        public string Text;
+        public Action<string> Callback;
+        public bool ForceRefresh;
+    }
 
     void Awake() {
         if (Instance != null && Instance != this) {
@@ -36,30 +46,98 @@ public class TranslatorClient : MonoBehaviour {
         SaveDiskCache();
     }
 
-    public void Translate(string text, Action<string> onResult) {
+    public void Translate(string text, Action<string> onResult, bool forceRefresh = false) {
         if (string.IsNullOrEmpty(text)) {
             onResult?.Invoke(text);
             return;
         }
 
-        if (cache.TryGetValue(text, out var cached)) {
+        if (!forceRefresh && cache.TryGetValue(text, out var cached)) {
             onResult?.Invoke(cached);
             return;
         }
 
-        StartCoroutine(TranslateCoroutine(text, onResult));
+        var req = new TranslateRequest { Text = text, Callback = onResult, ForceRefresh = forceRefresh };
+        queue.Enqueue(req);
+        if (!isProcessingQueue) {
+            StartCoroutine(ProcessQueue());
+        }
     }
 
-    IEnumerator TranslateCoroutine(string text, Action<string> onResult) {
-        int attempt = 0;
-        string payload = JsonUtility.ToJson(new { q = text, source = sourceLang, target = targetLang, format = "text" });
-        byte[] bodyRaw = Encoding.UTF8.GetBytes(payload);
+    public void TranslateBatch(List<string> texts, Action<Dictionary<string, string>> onResult, bool forceRefresh = false) {
+        if (texts == null || texts.Count == 0) {
+            onResult?.Invoke(new Dictionary<string, string>());
+            return;
+        }
 
+        var resultMap = new Dictionary<string, string>();
+        var pending = new List<string>();
+
+        foreach (var text in texts) {
+            if (string.IsNullOrEmpty(text)) {
+                continue;
+            }
+
+            if (!forceRefresh && cache.TryGetValue(text, out var cached)) {
+                resultMap[text] = cached;
+            }
+            else {
+                pending.Add(text);
+            }
+        }
+
+        if (pending.Count == 0) {
+            onResult?.Invoke(resultMap);
+            return;
+        }
+
+        int total = pending.Count;
+        var completed = 0;
+
+        foreach (var text in pending) {
+            Translate(text, (translated) => {
+                if (!string.IsNullOrEmpty(translated)) {
+                    resultMap[text] = translated;
+                }
+                completed++;
+                if (completed >= total) {
+                    onResult?.Invoke(resultMap);
+                }
+            }, forceRefresh);
+        }
+    }
+
+    private IEnumerator ProcessQueue() {
+        isProcessingQueue = true;
+
+        while (queue.Count > 0) {
+            while (activeRequests >= maxConcurrentRequests) {
+                yield return null;
+            }
+
+            var req = queue.Dequeue();
+            if (req == null) {
+                continue;
+            }
+
+            activeRequests++;
+            StartCoroutine(TranslateCoroutine(req.Text, req.Callback, req.ForceRefresh, () => activeRequests--));
+        }
+
+        isProcessingQueue = false;
+    }
+
+    private IEnumerator TranslateCoroutine(string text, Action<string> onResult, bool forceRefresh, Action onComplete) {
+        int attempt = 0;
         while (attempt <= maxRetries) {
             using (var uwr = new UnityWebRequest(serverUrl, "POST")) {
+                string payload = JsonUtility.ToJson(new { q = text, source = sourceLang, target = targetLang, format = "text" });
+                byte[] bodyRaw = Encoding.UTF8.GetBytes(payload);
+
                 uwr.uploadHandler = new UploadHandlerRaw(bodyRaw);
                 uwr.downloadHandler = new DownloadHandlerBuffer();
                 uwr.SetRequestHeader("Content-Type", "application/json");
+
                 yield return uwr.SendWebRequest();
 
 #if UNITY_2020_1_OR_NEWER
@@ -72,28 +150,40 @@ public class TranslatorClient : MonoBehaviour {
                         var respText = uwr.downloadHandler.text;
                         var resp = JsonUtility.FromJson<LibreResponse>(respText);
                         var translated = resp != null && !string.IsNullOrEmpty(resp.translatedText) ? resp.translatedText : respText;
+                        if (string.IsNullOrEmpty(translated)) {
+                            translated = text;
+                        }
+
                         cache[text] = translated;
                         onResult?.Invoke(translated);
+                        onComplete?.Invoke();
                         yield break;
                     }
                     catch (Exception e) {
                         Debug.LogWarning("[TranslatorClient] parse failed: " + e + " raw: " + uwr.downloadHandler.text);
                         onResult?.Invoke(text);
+                        onComplete?.Invoke();
                         yield break;
                     }
                 }
                 else {
-                    Debug.LogWarning($"[TranslatorClient] request failed (attempt {attempt}): {uwr.error}");
                     attempt++;
+                    if (attempt > maxRetries) {
+                        Debug.LogWarning($"[TranslatorClient] Translation failed after {maxRetries} retries. Text: {text}; Error: {uwr.error}");
+                        onResult?.Invoke(text);
+                        onComplete?.Invoke();
+                        yield break;
+                    }
+
                     yield return new WaitForSeconds(0.2f * attempt);
                 }
             }
         }
 
-        onResult?.Invoke(text);
+        onComplete?.Invoke();
     }
 
-    void LoadDiskCache() {
+    private void LoadDiskCache() {
         try {
             if (System.IO.File.Exists(cachePath)) {
                 var json = System.IO.File.ReadAllText(cachePath);
@@ -110,19 +200,18 @@ public class TranslatorClient : MonoBehaviour {
         }
     }
 
-    void SaveDiskCache() {
+    private void SaveDiskCache() {
         try {
             var kv = new SerializableDict();
             var keys = new List<string>();
             var values = new List<string>();
-            foreach (var kvp in cache) {
-                keys.Add(kvp.Key);
-                values.Add(kvp.Value);
+            foreach (var item in cache) {
+                keys.Add(item.Key);
+                values.Add(item.Value);
             }
             kv.keys = keys.ToArray();
             kv.values = values.ToArray();
-            var json = JsonUtility.ToJson(kv);
-            System.IO.File.WriteAllText(cachePath, json);
+            System.IO.File.WriteAllText(cachePath, JsonUtility.ToJson(kv));
         }
         catch (Exception e) {
             Debug.LogWarning("[TranslatorClient] SaveDiskCache failed: " + e);
